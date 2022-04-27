@@ -170,7 +170,7 @@ impl Display for ListFileType {
                 },
                 Symlink{name,icon}=>{
                     let start_color=cyan.bg_string();
-                    let mid_color=format!("{}{}",cyan.fg_string(),black.bg_string());
+                    let mid_color=format!("{}{}",cyan.bg_string(),black.fg_string());
                     let end_color=format!("{}{}",Reset.bg_str(),cyan.fg_string());
                     write!(formatter,"{}{} {}{}{}",start_color,mid_color,icon,name,end_color)
                 },
@@ -527,9 +527,14 @@ impl Display for Dir {
     }
 }
 impl Dir {
-    fn new(wd:String,first:bool)->Dir {
+    fn new(wd:String,first:bool,cached:bool,cached_dir:&str,cached_tmp_dir:&str)->Dir {
         let pre=if!first{""}else{""}.to_string();
-        let content=format!("{}",wd);
+        let content=if cached {
+            let wd=wd.trim_start_matches(cached_tmp_dir).trim_end_matches('/');
+            format!(" {}/{}",cached_dir,wd).trim_end_matches('/').to_string()
+        } else {
+            format!("{}",wd)
+        };
         Dir {pre,content}
     }
 }
@@ -596,31 +601,38 @@ impl DirList {
     fn len(&self)->usize {self.items.len()}
     fn new(pwd:String,uid:u32)->Result<DirList,io::Error> {
         let mut items=Vec::new();
-        for item in read_dir(&pwd)? {
-            let item=item?;
-            let file_type=item.file_type()?;
-            let name=item.file_name().into_string().expect("Found a non UTF8 filename");
-            if file_type.is_symlink() {
-                let path=item.path();
-                if let Ok(link)=read_link(path) {
-                    if let Ok(metadata)=link.metadata() {
-                        items.push(ListFileType::new_symlink(name,metadata.file_type()));
+        if let Ok(dir_iter)=read_dir(&pwd) {
+            for item in dir_iter {
+                if let Ok(item)=item {
+                    let file_type=item.file_type()?;
+                    let name=item.file_name().into_string().expect("Found a non UTF8 filename");
+                    if file_type.is_symlink() {
+                        let path=item.path();
+                        if let Ok(link)=read_link(path) {
+                            if let Ok(metadata)=link.metadata() {
+                                items.push(ListFileType::new_symlink(name,metadata.file_type()));
+                            }
+                        }
+                    } else if file_type.is_dir() {
+                        let item_count=if let Ok(dir)=read_dir(item.path()) {
+                            dir.count()
+                        } else {
+                            0
+                        };
+                        items.push(ListFileType::new_dir(name,pwd.clone(),item_count));
+                    } else if file_type.is_char_device() {
+                        items.push(ListFileType::new_char(name));
+                    } else if file_type.is_block_device() {
+                        items.push(ListFileType::new_block(name));
+                    } else {    // it is a file. we don't support sockets or FIFOs yet
+                        let metadata=item.metadata()?;
+                        let mode=metadata.mode();
+                        let any_exec=mode&0o001==0o001&&uid==metadata.uid();
+                        let user_exec=mode&0o100==0o100;
+                        let exec=any_exec|user_exec;
+                        items.push(ListFileType::new_file(name,exec));
                     }
                 }
-            } else if file_type.is_dir() {
-                let item_count=read_dir(item.path())?.count();
-                items.push(ListFileType::new_dir(name,pwd.clone(),item_count));
-            } else if file_type.is_char_device() {
-                items.push(ListFileType::new_char(name));
-            } else if file_type.is_block_device() {
-                items.push(ListFileType::new_block(name));
-            } else {    // it is a file. we don't support sockets or FIFOs yet
-                let metadata=item.metadata()?;
-                let mode=metadata.mode();
-                let any_exec=mode&0o001==0o001&&uid==metadata.uid();
-                let user_exec=mode&0o100==0o100;
-                let exec=any_exec|user_exec;
-                items.push(ListFileType::new_file(name,exec));
             }
         }
         return Ok(DirList{items});
@@ -718,6 +730,10 @@ fn main() { // dirs command displays directory stack
     // wd=(echo "$PWD"|sed "s@$HOME@~@g")
     let mut wd=env.get("PWD").unwrap().clone();
     // pwd=(echo "$PWD")
+    let blank_string=String::new();
+    let cached=env.get("CACHED").unwrap_or(&blank_string)=="true";
+    let cached_dir=env.get("CACHED_DIR").unwrap_or(&blank_string);
+    let cached_tmp_dir=env.get("CACHED_TMP_DIR").unwrap_or(&blank_string);
     let pwd=env.get("PWD").unwrap();
     let home=env.get("HOME").unwrap();
     let uid_str=String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
@@ -726,17 +742,19 @@ fn main() { // dirs command displays directory stack
     if wd.starts_with(home) {
         wd.replace_range(0..home.len(),"~");
     }
+    let mut execute_oneline=true;
     // arg parsing
     if args.len()>=5 {
         if args[3]=="--prompt" {
+            execute_oneline=false;
             let status=args[4].trim().to_string();
             let status=Status::new(status,true);
             let dir_list=DirList::new(pwd.clone(),uid).unwrap();
             let file_count=FileCount::new(dir_list.len(),false);
             let time=Time::new(status.is_active());
-            let dir=Dir::new(wd.clone(),false);
+            let dir=Dir::new(wd.clone(),false,cached,cached_dir,cached_tmp_dir);
             let git=Git::new(pwd,false);
-            let uncolored=format!("{:#}{:#}{:#}{:#}",time,dir,git,file_count);
+            let uncolored=format!("{:#}{:#}{:#}{:#}{:#}",status,time,dir,git,file_count);
             let len=uncolored.chars().count()+1;  // easiest way to get a count of the unicode characters
             print!("{}{}{}{}{}",status,time,dir,git,file_count);
             let white=Rgb(0xff,0xff,0xff);
@@ -758,9 +776,8 @@ fn main() { // dirs command displays directory stack
                     }
                 }
             }
-            return;
-        }
-        if args[3]=="--preexec" {
+        } else if args[3]=="--preexec" {
+            execute_oneline=false;
             print!("\r{}",ClearCurrentLine);
             for _ in 0..MAX_LINES {
                 print!("{}{}",CursorUp(1),ClearCurrentLine);
@@ -768,8 +785,12 @@ fn main() { // dirs command displays directory stack
             // time to create another prompt
             let cyan=Rgb(0x06,0x98,0x9A);
             let black=Rgb(0,0,0);
-            println!("{}{}{}{}{}{}{}",
+            let dir=Dir::new(wd.clone(),false,cached,cached_dir,cached_tmp_dir);
+            let git=Git::new(pwd,false);
+            println!("{}{}{}{}{}{}{}{}{}",
                 Time::new(true),
+                dir,
+                git,
                 cyan.bg_string(),   // bg
                 black.fg_string(),  // fg
                 args[4],
@@ -777,14 +798,14 @@ fn main() { // dirs command displays directory stack
                 Reset.bg_str(),
                 Reset.fg_str(),
             );
-            return;
-        }
-        if args[3]=="--postexec" {
+        } else if args[3]=="--postexec" {
+            execute_oneline=false;
             // unsupported so far
-            return;
         }
     } else if args.len()>=4 {
     }
-    // default single line prompt
-    println!("{}{}└ﲒ ",Reset.fg_str(),Reset.bg_str());
+    if execute_oneline {
+        // default single line prompt
+        println!("{}{}└ﲒ ",Reset.fg_str(),Reset.bg_str());
+    }
 }
