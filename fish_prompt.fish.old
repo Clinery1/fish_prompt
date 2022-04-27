@@ -1,0 +1,321 @@
+function fish_prompt --description 'Informative prompt'
+    #Save the return status of the previous command
+    set last_pipestatus $pipestatus
+    set last_status $status
+
+    set TAN "D7AF87"
+    set GREEN "87d787"
+    set BLUE "00afff"
+    set BLACK "000"
+    set GREY "222"
+    set PINK "FF5F87"
+    set RED "CC0000"
+    set PURPLE "bf00Ff"
+    set OLD_PURPLE "9500F5"
+    set DARKBLUE "3465A4"
+    set CYAN "06989A"
+    set DEVICE_COLOR "C4A000"
+    set EXECUTABLE_COLOR "4E9A06"
+    set FIRST "true"
+    set FILE_COUNT (ls -1A|count)
+    if [ "$TERM" != "linux" ]
+        set PROMPT_LINE (
+            if echo "$last_pipestatus"|grep -e "[1-9]" -s >/dev/null
+                for last_status in $last_pipestatus
+                    if $FIRST
+                        set FIRST "false"
+                        echo -n (fish_status_to_signal $last_status)
+                    else
+                        echo -n "ﳣ"
+                        echo -n (fish_status_to_signal $last_status)
+                    end
+                end
+                echo -n ""
+            end
+            echo -n (date "+%H:%M")
+            echo -n ""
+            echo -n $PWD|sed "s@^/home/clinery@~@"
+            echo -n ""
+            if git status 2>/dev/null >/dev/null
+                echo -n "Git"
+                echo -n (git branch --show-current)
+                echo -n ""
+                echo -n (git rev-parse --short HEAD)
+            end
+            echo -n ""
+            echo -n ""
+            if [ "$FILE_COUNT" = "1" ]
+                echo -n "$FILE_COUNT file"
+            else if [ "$FILE_COUNT" = "0" ]
+                echo -n "no files"
+            else
+                echo -n "$FILE_COUNT files"
+            end
+        )
+        set FIRST "true"
+        set LENGTH (string length $PROMPT_LINE)
+        if echo "$last_pipestatus"|grep -e "[1-9]" -s >/dev/null
+            for last_status in $last_pipestatus
+                if $FIRST
+                    set FIRST "false"
+                    set_color $BLACK -b $RED
+                    echo -n (fish_status_to_signal $last_status)
+                else
+                    echo -n "ﳣ"
+                    echo -n (fish_status_to_signal $last_status)
+                end
+            end
+            set_color $RED -b $BLUE
+            echo -n ""
+        end
+        set_color $BLACK -b $BLUE --bold
+        echo -n (date "+%H:%M")
+        set_color $BLUE -b $GREEN
+        echo -n ""
+        set_color $BLACK -b $GREEN
+        echo -n $PWD|sed "s@^$HOME@~@"
+        set_color $GREEN -b $GREY
+        echo -n ""
+        set_color $PURPLE -b $GREY
+        if git status 2>/dev/null >/dev/null
+            echo -n "Git"
+            echo -n (git branch --show-current)
+            echo -n ""
+            echo -n (git rev-parse --short HEAD)
+        end
+        set_color $GREY -b $TAN
+        echo -n ""
+        set_color $BLACK -b $TAN
+        if [ "$FILE_COUNT" = "1" ]
+            echo -n "$FILE_COUNT file"
+        else if [ "$FILE_COUNT" = "0" ]
+            echo -n "no files"
+        else
+            echo -n "$FILE_COUNT files"
+        end
+        set_color $TAN
+        set MAX_LENGTH (calc -p "($COLUMNS - $LENGTH)-1")
+        set MAX_LINES "1"
+        for item in (/bin/ls -1A)
+            if [ -d "$item" ]
+                set ITEM_LENGTH (string length $item)
+                set MAX_LENGTH (calc -p "$MAX_LENGTH-($ITEM_LENGTH+3)")
+                if [ "$MAX_LENGTH" -lt "0" ]
+                    if [ "$MAX_LINES" -gt "0" ]
+                        set_color -b $BLACK
+                        echo -n ""
+                        set_color normal
+                        echo
+                        set MAX_LENGTH "$COLUMNS-($ITEM_LENGTH+3)"
+                        set MAX_LINES (calc -p "$MAX_LINES-1")
+                    else
+                        break
+                    end
+                end
+                set_color -b $DARKBLUE
+                echo -n ""
+                set_color normal
+                set_color -b $DARKBLUE
+                echo -n " "
+                if [ "$PWD" = "/home" ]
+                    echo -n ""
+                else if [ "$item" = ".git" ]
+                    echo -n ""
+                else if [ "$item" = ".vim" -o "$item" = ".nvim" ]
+                    echo -n ""
+                else if [ "$item" = "Desktop" ]
+                    echo -n ""
+                else if [ "$item" = "Documents" ]
+                    echo -n ""
+                else if [ "$item" = "Downloads" ]
+                    echo -n ""
+                else if [ "$item" = "Pictures" -o "$item" = "images" ]
+                    echo -n ""
+                else if [ "$item" = "Videos" -o "$item" = "videos" ]
+                    echo -n ""
+                else if [ "$item" = "sounds" ]
+                    echo -n ""
+                else if [ "$item" = "src" ]
+                    echo -n ""
+                else
+                    if [ (ls -1A|count) -gt "0" ]
+                        echo -n ""
+                    else
+                        echo -n ""
+                    end
+                end
+                echo -n "$item"
+                set_color $DARKBLUE
+            else if [ -L "$item" ]
+                set ITEM_LENGTH (string length $item)
+                set MAX_LENGTH (calc -p "$MAX_LENGTH-($ITEM_LENGTH+3)")
+                if [ "$MAX_LENGTH" -lt "0" ]
+                    if [ "$MAX_LINES" -gt "0" ]
+                        set_color -b $BLACK
+                        echo -n ""
+                        set_color normal
+                        echo
+                        set MAX_LENGTH "$COLUMNS-($ITEM_LENGTH+3)"
+                        set MAX_LINES (calc -p "$MAX_LINES-1")
+                    else
+                        break
+                    end
+                end
+                set_color -b $CYAN
+                echo -n ""
+                set_color $BLACK -b $CYAN
+                echo -n " $item"
+                set_color $CYAN
+            else
+                if [ -c "$item" ]
+                    set ITEM_LENGTH (string length $item)
+                    set MAX_LENGTH (calc -p "$MAX_LENGTH-($ITEM_LENGTH+3)")
+                    if [ "$MAX_LENGTH" -lt "0" ]
+                        if [ "$MAX_LINES" -gt "0" ]
+                            set_color -b $BLACK
+                            echo -n ""
+                            set_color normal
+                            echo
+                            set MAX_LENGTH "$COLUMNS-($ITEM_LENGTH+3)"
+                            set MAX_LINES (calc -p "$MAX_LINES-1")
+                        else
+                            break
+                        end
+                    end
+                    set_color -b $BLACK
+                    echo -n ""
+                    set_color $DEVICE_COLOR
+                    echo -n " $item"
+                    set_color $BLACK
+                else if [ -b "$item" ]
+                    set ITEM_LENGTH (string length $item)
+                    set MAX_LENGTH (calc -p "$MAX_LENGTH-($ITEM_LENGTH+3)")
+                    if [ "$MAX_LENGTH" -lt "0" ]
+                        if [ "$MAX_LINES" -gt "0" ]
+                            set_color -b $BLACK
+                            echo -n ""
+                            set_color normal
+                            echo
+                            set MAX_LENGTH "$COLUMNS-($ITEM_LENGTH+3)"
+                            set MAX_LINES (calc -p "$MAX_LINES-1")
+                        else
+                            break
+                        end
+                    end
+                    set_color -b $BLACK
+                    echo -n ""
+                    set_color $DEVICE_COLOR
+                    echo -n " $item"
+                    set_color $BLACK
+                else
+                    set EXTENSION (echo "$item"|sed "s/^.*\.//g")
+                    set ITEM_LENGTH (string length $item)
+                    set MAX_LENGTH (calc -p "$MAX_LENGTH-($ITEM_LENGTH+3)")
+                    if [ "$MAX_LENGTH" -lt "0" ]
+                        if [ "$MAX_LINES" -gt "0" ]
+                            set_color -b $BLACK
+                            echo -n ""
+                            set_color normal
+                            echo
+                            set MAX_LENGTH "$COLUMNS-($ITEM_LENGTH+3)"
+                            set MAX_LINES (calc -p "$MAX_LINES-1")
+                        else
+                            break
+                        end
+                    end
+                    set_color -b $BLACK
+                    echo -n ""
+                    if [ -x "$item" ]
+                        set_color $EXECUTABLE_COLOR
+                    else
+                        set_color normal
+                    end
+                    echo -n " "
+                    if [ "$item" = "Makefile" -o "$EXTENSION" = "ld" -o "$EXTENSION" = "ninja" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "fish" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "lock" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "key" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "keys" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "sh" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "png" -o "$EXTENSION" = "jpg" -o "$EXTENSION" = "bmp" -o "$EXTENSION" = "jpeg" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "txt" -o "$EXTENSION" = "odt" -o "$EXTENSION" = "log" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "img" -o "$EXTENSION" = "iso" -o "$EXTENSION" = "vhd" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "md" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "rs" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "c" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "cpp" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "js" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "html" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "css" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "ino" ]
+                        echo -n "ﮧ"
+                    else if [ "$EXTENSION" = "exe" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "gz" -o "$EXTENSION" = "xz" -o "$EXTENSION" = "zstd" -o "$EXTENSION" = "zip" -o "$EXTENSION" = "rar" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "tar" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "apk" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "docx" -o "$EXTENSION" = "doc" -o "$EXTENSION" = "odf" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "xlsx" -o "$EXTENSION" = "xls" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "pptx" -o "$EXTENSION" = "ppt" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "gitignore" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "vimrc" -o "$EXTENSION" = "vim" -o "$EXTENSION" = "nvim" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "psf" -o "$EXTENSION" = "ttf" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "bin" -o "$EXTENSION" = "rom" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "calc" -o "$EXTENSION" = "calcrc" ]
+                        echo -n ""
+                    else if [ "$EXTENSION" = "godot" -o "$EXTENSION" = "gd" -o "$EXTENSION" = "tscn" -o "$EXTENSION" = "tsc" -o "$EXTENSION" = "tres" ]
+                        echo -n "ﮧ"
+                    else if [ "$EXTENSION" = "toml" -o "$EXTENSION" = "cfg" -o "$EXTENSION" = "conf" -o "$EXTENSION" = "yml" -o "$EXTENSION" = "json" -o "$EXTENSION" = "ini" ]
+                        echo -n ""
+                    else if echo "$EXTENSION"|grep "history">/dev/null
+                        echo -n ""
+                    else
+                        echo -n ""
+                    end
+                    echo -n "$item"
+                    set_color $BLACK
+                end
+            end
+        end
+        set_color -b $BLACK
+        echo -n ""
+        set_color normal
+        # Create a second line incase our command is very long
+        echo -ne "\n\n\e[A"
+        # Final item. The command line
+        echo -ne "﬌  "   # I don't know why we need 2 spaces here
+    else
+        set_color green
+        echo -n "$USER "
+        set_color red
+        echo -n $PWD|sed "s@^$HOME@~@"
+        set_color normal
+        echo -n "# "
+    end
+end
