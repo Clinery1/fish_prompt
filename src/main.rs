@@ -1,704 +1,173 @@
-use git2::{
-    Repository,
-    Branch,
-};
-use termion::{
+use crossterm::{
     style::{
-        Bold,
-        Reset as SReset,
+        Attribute,
+        SetAttribute,
+        SetForegroundColor,
+        SetBackgroundColor,
+        Color,
     },
-    color::{
-        Rgb,
-        Reset,
+    terminal::{
+        Clear,
+        ClearType,
+        size as get_terminal_size,
     },
-    clear::{
-        CurrentLine as ClearCurrentLine,
-    },
-    cursor::Up as CursorUp,
+    cursor::MoveUp as CursorUp,
 };
-use chrono::prelude::*;
 use std::{
-    fmt::{
-        self,
-        Display,
-        Formatter,
-    },
-    fs::{
-        read_dir,
-        FileType,
-        read_link,
-    },
-    os::unix::fs::{
-        FileTypeExt,
-        MetadataExt,
-    },
     env::{
         vars,
         args,
     },
-    path::Path,
     collections::HashMap,
     process::Command,
-    io,
 };
+use file_list_widget::*;
+use pwd_widget::*;
+use git_widget::*;
+use time_widget::*;
+use pipe_status_widget::*;
 
 
-#[derive(PartialEq)]
-enum ListFileType {
-    File {
-        name:String,
-        primary:FileIcon,
-        secondary:Option<FileIcon>,
-        executable:bool,
-    },
-    Directory {
-        name:String,
-        icon:DirIcon,
-        items:usize,
-    },
-    Symlink {
-        name:String,
-        icon:SymlinkIcon,
-    },
-    Character {
-        name:String,
-    },
-    Block {
-        name:String,
-    },
+mod file_list_widget;
+mod file_count_widget;
+mod pwd_widget;
+mod git_widget;
+mod time_widget;
+mod pipe_status_widget;
+
+
+pub trait StatuslineWidget {
+    fn display(&self,f:&mut StatuslineFormatter);
 }
-impl ListFileType {
-    fn new_dir(name:String,pwd:String,items:usize)->ListFileType {
-        let mut icon=DirIcon::from(name.as_str());
-        if icon==DirIcon::ClosedFolder&&items>0 {
-            icon=DirIcon::OpenFolder;
-        }
-        if pwd=="/home" {
-            icon=DirIcon::HomeFolder;
-        }
-        ListFileType::Directory {
-            name,
-            icon,
-            items,
+pub struct StatuslineFormatter {
+    prev_bg:Color,
+    first:bool,
+    /// lines is a list of lengths of all the lines the prompt can cover from bottom (index 0) to
+    /// top (index len-1)
+    lines:Vec<usize>,
+}
+impl StatuslineFormatter {
+    pub fn new(width:usize,lines:usize)->Self {
+        Self {
+            prev_bg:Color::Rgb{r:0,g:0,b:0},
+            first:true,
+            lines:vec![width;lines],
         }
     }
-    fn new_symlink(name:String,file_type:FileType)->ListFileType {
-        let icon;
-        if file_type.is_dir() {
-            icon=SymlinkIcon::Dir;
-        } else if file_type.is_symlink() {
-            icon=SymlinkIcon::Link;
-        } else if file_type.is_char_device() {
-            icon=SymlinkIcon::Char;
-        } else if file_type.is_block_device() {
-            icon=SymlinkIcon::Block;
-        } else {
-            icon=SymlinkIcon::File;
+    pub fn line_chars_left(&self)->Option<usize> {
+        self.lines.last().map(|l|*l)
+    }
+    pub fn write_section(&mut self,section:&str,fg:Color,bg:Color,attributes:Vec<Attribute>)->bool {
+        let mut length=section.chars().count();
+        // eprintln!("\"{}\":{}; {:?}",section,length,self.lines);
+        if !self.first {
+            length+=1;
         }
-        ListFileType::Symlink {
-            name,
-            icon,
-        }
-    }
-    fn new_char(name:String)->ListFileType {
-        ListFileType::Character{name}
-    }
-    fn new_block(name:String)->ListFileType {
-        ListFileType::Block{name}
-    }
-    fn new_file(name:String,executable:bool)->ListFileType {
-        let (primary,secondary)=FileIcon::from_str(name.as_str());
-        ListFileType::File {
-            primary,
-            secondary,
-            executable,
-            name,
-        }
-    }
-}
-impl Display for ListFileType {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        use ListFileType::*;
-        if formatter.alternate() {  // uncolored
-            match self {
-                File{name,primary,secondary,..}=>{  // we dont care about executable cause we have no colors
-                    let s;
-                    if let Some(secondary)=secondary {
-                        s=format!("{}",secondary);
-                    } else {
-                        s=String::new();
-                    }
-                    write!(formatter," {}{}{}",primary,s,name)
-                },
-                Directory{name,icon,items}=>{
-                    let i=if *items>0 {
-                        format!("[{}]",items)
-                    } else {String::new()};
-                    write!(formatter," {}{}{}",icon,name,i)
-                },
-                Symlink{name,icon}=>write!(formatter," {}{}",icon,name),
-                Character{name}=>write!(formatter," {}",name),
-                Block{name}=>write!(formatter," {}",name),
-            }
-        } else {
-            let black=Rgb(0x0,0x0,0x0);
-            let dark_blue=Rgb(0x34,0x65,0xA4);
-            let cyan=Rgb(0x06,0x98,0x9A);
-            let device_color=Rgb(0xC4,0xA0,0x00);
-            let executable_color=Rgb(0x4E,0x9A,0x06);
-            match self {
-                File{name,primary,secondary,executable}=>{
-                    let s;
-                    if let Some(secondary)=secondary {
-                        s=format!("{}",secondary);
-                    } else {
-                        s=String::new();
-                    }
-                    let start_color=black.bg_string();
-                    let mid_color=format!("{}{}",if *executable{executable_color.fg_string()}else{Reset.fg_str().to_string()},black.bg_string());
-                    let end_color=format!("{}{}",black.fg_string(),Reset.bg_str());
-                    write!(formatter,"{}{} {}{}{}{}",start_color,mid_color,primary,s,name,end_color)
-                },
-                Directory{name,icon,items}=>{
-                    let i=if *items>0 {
-                        format!("[{}]",items)
-                    } else {String::new()};
-                    let start_color=dark_blue.bg_string();
-                    let mid_color=format!("{}{}",dark_blue.bg_string(),Reset.fg_str());
-                    let end_color=format!("{}{}",Reset.bg_str(),dark_blue.fg_string());
-                    write!(formatter,"{}{} {}{}{}{}",start_color,mid_color,icon,name,i,end_color)
-                },
-                Symlink{name,icon}=>{
-                    let start_color=cyan.bg_string();
-                    let mid_color=format!("{}{}",cyan.bg_string(),black.fg_string());
-                    let end_color=format!("{}{}",Reset.bg_str(),cyan.fg_string());
-                    write!(formatter,"{}{} {}{}{}",start_color,mid_color,icon,name,end_color)
-                },
-                Character{name}=>{
-                    let start_color=black.bg_string();
-                    let mid_color=format!("{}{}",device_color.fg_string(),black.bg_string());
-                    let end_color=format!("{}{}",Reset.bg_str(),black.fg_string());
-                    write!(formatter,"{}{} {}{}",start_color,mid_color,name,end_color)
-                },
-                Block{name}=>{
-                    let start_color=black.bg_string();
-                    let mid_color=format!("{}{}",device_color.fg_string(),black.bg_string());
-                    let end_color=format!("{}{}",Reset.bg_str(),black.fg_string());
-                    write!(formatter,"{}{} {}{}",start_color,mid_color,name,end_color)
-                },
-            }
-        }
-    }
-}
-/// Added after the link icon. Example: `` for a link to a folder
-#[derive(PartialEq)]
-enum SymlinkIcon {
-    Link,
-    Dir,
-    File,
-    Block,
-    Char,
-}
-impl Display for SymlinkIcon {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        use SymlinkIcon::*;
-        match self {
-            Link=>write!(formatter,""),
-            Dir=>write!(formatter,""),
-            File=>write!(formatter,""),
-            Block=>write!(formatter,""),
-            Char=>write!(formatter,""),
-        }
-    }
-}
-#[derive(PartialEq)]
-enum DirIcon {
-    Git,
-    Pictures,
-    Videos,
-    Documents,
-    Downloads,
-    HomeFolder,
-    Desktop,
-    Sounds,
-    CodeSource,
-    Vim,
-    OpenFolder,
-    ClosedFolder,
-}
-impl From<&str> for DirIcon {
-    fn from(name:&str)->DirIcon {
-        use DirIcon::*;
-        match name {
-            ".git"=>Git,
-            "Pictures"=>Pictures,
-            "Videos"=>Videos,
-            "Documents"=>Documents,
-            "Downloads"=>Downloads,
-            "Desktop"=>Desktop,
-            "Sounds"=>Sounds,
-            "src"=>CodeSource,
-            ".vim"|".nvim"|"vim"|"nvim"|".neovim"|"neovim"=>Vim,
-            _=>ClosedFolder,
-        }
-    }
-}
-impl Display for DirIcon {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        use DirIcon::*;
-        match self {
-            Git=>write!(formatter,""),
-            Pictures=>write!(formatter,""),
-            Videos=>write!(formatter,""),
-            Documents=>write!(formatter,""),
-            Downloads=>write!(formatter,""),
-            HomeFolder=>write!(formatter,""),
-            Desktop=>write!(formatter,""),
-            Sounds=>write!(formatter,""),
-            CodeSource=>write!(formatter,""),
-            Vim=>write!(formatter,""),
-            OpenFolder=>write!(formatter,""),
-            ClosedFolder=>write!(formatter,""),
-        }
-    }
-}
-#[derive(PartialEq)]
-enum FileIcon {
-    /// `Makefile`, `configure`, `build`, `*.ld`, `*.ninja`. Subject to change
-    BuildTools,
-    /// `LICENCE` filename
-    License,
-    /// `run` filename
-    Run,
-    /// `*.gdb`
-    Gdb,
-    /// `*.fish`
-    Fish,
-    /// `*.lock`
-    Lock,
-    /// `*.key`
-    Key,
-    /// `*.keys`
-    Keys,
-    /// `*.sh`
-    Shell,
-    /// `*.png`, `*.jpg`, `*.jpeg`
-    Image,
-    /// `*txt`, `*.odt`, `*.log`
-    Text,
-    /// `*.img`, `*.iso`, `*.vhd`
-    HardDriveImage,
-    /// `*.md`
-    Markdown,
-    /// `*.rs`
-    Rust,
-    /// `*.c`, `*.h`
-    C,
-    /// `*.cpp`, `*.hpp`, `*.ino` for arduino
-    Cpp,
-    /// `*.js`, `*.ts`
-    Javascript,
-    /// `*.py`
-    Python,
-    /// `*.html`
-    Html,
-    /// `*.css`
-    Css,
-    /// `*.exe`, `*.dll`
-    Windows,
-    /// `*.gz`, `*.zstd`, `*.xz`
-    Compressed,
-    /// `*.tar` `*.tar.FORMAT` where FORMAT is a compression format is stored as
-    /// primary:Compressed, secondary:Some(Archive),
-    Archive,
-    /// `*.zip`, `*.rar`
-    CompressedArchive,
-    /// `*.apk`
-    AndroidApp,
-    /// `*.docx`, `*.odf`, `*.doc`
-    Document,
-    /// `*.xlsx`, `*.xls`
-    Spreadsheet,
-    /// `*.pptx`, `*.ppt`
-    Presentation,
-    /// `*.gitignore`
-    Git,
-    /// `*.vim`, `*.nvim`
-    Vim,
-    /// `*.ttf`, `*.psf`
-    Font,
-    /// `*.bin` `*.rom`
-    Binary,
-    /// `*.calc`
-    Calc,
-    /// `*.godot`, `*.gd`, `*.tscn`, `*.tsc`, `*.tres`
-    Godot,
-    /// `*.cfg`, `*.conf`, `*.toml`, `*.yml`, `*.json`, `*.ini`
-    Config,
-    /// `*history` so everything that ends with history
-    History,
-    /// Everything else
-    Regular,
-}
-impl FileIcon {
-    fn from_str(name:&str)->(FileIcon,Option<FileIcon>) {
-        if name.contains('.') {
-            let mut split=name.split('.').collect::<Vec<_>>();
-            if split.len()>=2 {
-                let primary=Self::match_extension(split.pop().unwrap());
-                let mut secondary=None;
-                if split.len()>=2 {
-                    let s=Self::match_extension(split.pop().unwrap());
-                    if s!=FileIcon::Regular {secondary=Some(s)}
+        let mut last=if let Some(l)=self.lines.last_mut() {
+            l
+        } else {return false};
+        if length>*last {
+            self.lines.pop();
+            if let Some(last)=self.lines.last() {
+                if *last<length {
+                    return false;
                 }
-                return (primary,secondary);
-            }
-        }
-        if name=="Makefile"||name=="build"||name=="configure" {return (FileIcon::BuildTools,None)}
-        if name=="run" {return (FileIcon::Run,None)}
-        if name=="LICENSE" {return (FileIcon::License,None)}
-        return (FileIcon::Regular,None);
-    }
-    fn match_extension(ext:&str)->FileIcon {
-        use FileIcon::*;
-        match ext {
-            "gitignore"=>Git,
-            "apk"=>AndroidApp,
-            "cfg"|"conf"|"toml"|"yml"|"json"|"ini"=>Config,
-            "calc"=>Calc,
-            "godot"|"gd"|"tscn"|"tsc"|"tres"=>Godot,
-            "bin"|"rom"=>Binary,
-            "psf"|"ttf"=>Font,
-            "pptx"|"ppt"=>Presentation,
-            "xlsx"|"xls"=>Spreadsheet,
-            "docx"|"odf"|"doc"=>Document,
-            "ld"|"ninja"=>BuildTools,
-            "gdb"=>Gdb,
-            "fish"=>Fish,
-            "lock"=>Lock,
-            "key"=>Key,
-            "keys"=>Keys,
-            "sh"=>Shell,
-            "png"|"jpg"|"jpeg"=>Image,
-            "txt"|"odt"|"log"=>Text,
-            "img"|"iso"|"vhd"=>HardDriveImage,
-            "md"=>Markdown,
-            "rs"=>Rust,
-            "c"|"h"=>C,
-            "cpp"|"hpp"=>Cpp,
-            ".vim"|".vimrc"|".nvimrc"|".nvim"=>Vim,
-            "js"|"ts"=>Javascript,
-            "py"=>Python,
-            "html"=>Html,
-            "css"=>Css,
-            "exe"|"dll"=>Windows,
-            "gz"|"zstd"|"xz"=>Compressed,
-            "tar"=>Archive,
-            "zip"|"rar"=>CompressedArchive,
-            _=>{
-                if ext.ends_with("history") {return History}
-                return Regular;
-            },
-        }
-    }
-}
-impl Display for FileIcon {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        use FileIcon::*;
-        match self {
-            BuildTools=>write!(formatter,""),
-            License=>write!(formatter,""),
-            Run=>write!(formatter,"ﰌ"),
-            Gdb=>write!(formatter,""),
-            Fish=>write!(formatter,""),
-            Lock=>write!(formatter,""),
-            Key=>write!(formatter,""),
-            Keys=>write!(formatter,""),
-            Shell=>write!(formatter,""),
-            Image=>write!(formatter,""),
-            Text=>write!(formatter,""),
-            HardDriveImage=>write!(formatter,""),
-            Markdown=>write!(formatter,""),
-            Rust=>write!(formatter,""),
-            C=>write!(formatter,""),
-            Cpp=>write!(formatter,""),
-            Javascript=>write!(formatter,""),
-            Python=>write!(formatter,""),
-            Html=>write!(formatter,""),
-            Css=>write!(formatter,""),
-            Windows=>write!(formatter,""),
-            Compressed=>write!(formatter,""),
-            Archive=>write!(formatter,""),
-            CompressedArchive=>write!(formatter,""),
-            AndroidApp=>write!(formatter,""),
-            Document=>write!(formatter,""),
-            Spreadsheet=>write!(formatter,""),
-            Presentation=>write!(formatter,""),
-            Git=>write!(formatter,""),
-            Vim=>write!(formatter,""),
-            Font=>write!(formatter,""),
-            Binary=>write!(formatter,""),
-            Calc=>write!(formatter,""),
-            Godot=>write!(formatter,"ﮧ"),
-            Config=>write!(formatter,""),
-            History=>write!(formatter,""),
-            Regular=>write!(formatter,""),
-        }
-    }
-}
-
-
-pub struct FileCount {
-    pre:String,
-    content:String,
-}
-impl Display for FileCount {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        if formatter.alternate() {
-            write!(formatter,"{}{}",self.pre,self.content)
-        } else {
-            let tan=Rgb(0xD7,0xAF,0x87);
-            let black=Rgb(0x0,0x0,0x0);
-            let start_color=format!("{}{}",Bold,tan.bg_string());
-            let mid_color=black.fg_string();
-            let end_color=format!("{}{}",SReset,tan.fg_string());
-            write!(formatter,"{}{}{}{}{}",start_color,self.pre,mid_color,self.content,end_color)
-        }
-    }
-}
-impl FileCount {
-    fn new(len:usize,first:bool)->FileCount {
-        let pre=if!first{""}else{""}.to_string();
-        let content=if len==0 {
-            format!("No files")
-        } else if len==1 {
-            format!("One file")
-        } else {
-            format!("{} files",len)
-        };
-        FileCount {
-            pre,
-            content,
-        }
-    }
-}
-struct Time {
-    pre:String,
-    content:String,
-}
-impl Display for Time {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        if formatter.alternate() {
-            write!(formatter,"{}{}",self.pre,self.content)
-        } else {
-            let blue=Rgb(0x00,0xaf,0xff);
-            let black=Rgb(0x0,0x0,0x0);
-            let start_color=format!("{}{}",Bold,blue.bg_string());
-            let mid_color=black.fg_string();
-            let end_color=format!("{}{}",SReset,blue.fg_string());
-            write!(formatter,"{}{}{}{}{}",start_color,self.pre,mid_color,self.content,end_color)
-        }
-    }
-}
-impl Time {
-    fn new(first:bool)->Time {
-        let local=Local::now();
-        let pre=if!first{""}else{""}.to_string();
-        let content=format!("{}",local.format("%H:%M:%S"));
-        Time {pre,content}
-    }
-}
-struct Dir {
-    pre:String,
-    content:String,
-}
-impl Display for Dir {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        if formatter.alternate() {
-            write!(formatter,"{}{}",self.pre,self.content)
-        } else {
-            let green=Rgb(0x87,0xd7,0x87);
-            let black=Rgb(0x0,0x0,0x0);
-            let start_color=format!("{}{}",Bold,green.bg_string());
-            let mid_color=black.fg_string();
-            let end_color=format!("{}{}",SReset,green.fg_string());
-            write!(formatter,"{}{}{}{}{}",start_color,self.pre,mid_color,self.content,end_color)
-        }
-    }
-}
-impl Dir {
-    fn new(wd:String,first:bool,cached:bool,cached_dir:&str,cached_tmp_dir:&str)->Dir {
-        let pre=if!first{""}else{""}.to_string();
-        let content=if cached {
-            let wd=wd.trim_start_matches(cached_tmp_dir).trim_end_matches('/');
-            format!(" {}/{}",cached_dir,wd).trim_end_matches('/').to_string()
-        } else {
-            format!("{}",wd)
-        };
-        Dir {pre,content}
-    }
-}
-struct Git {
-    pre:String,
-    content:String,
-}
-impl Display for Git {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        if formatter.alternate() {
-            write!(formatter,"{}{}",self.pre,self.content)
-        } else {
-            let grey=Rgb(0x22,0x22,0x22);
-            let purple=Rgb(0xbf,0x00,0xFf);
-            let start_color=format!("{}{}",Bold,grey.bg_string());
-            let mid_color=purple.fg_string();
-            let end_color=format!("{}{}",SReset,grey.fg_string());
-            write!(formatter,"{}{}{}{}{}",start_color,self.pre,mid_color,self.content,end_color)
-        }
-    }
-}
-impl Git {
-    fn new<T:AsRef<Path>>(pwd:T,first:bool)->Git {
-        let pre=if!first{""}else{""}.to_string();
-        let content=if let Ok(repo)=Repository::open(pwd) {
-            if let Ok(head)=repo.head() {
-                let commit=head.peel_to_commit().unwrap();
-                let id_string=format!("{}",commit.id());
-                let id_str=&id_string[..7];
-                let branch=Branch::wrap(head);
-                if let Ok(Some(branch_name))=branch.name() {
-                    format!("Git{}{}",branch_name,id_str)
-                } else {
-                    format!("GitNULL{}",id_str)
+                if *last>0 {
+                    self.write_section("",Color::Reset,Color::Reset,vec![]);
                 }
+                self.first=true;
+                println!("{}{}",SetForegroundColor(Color::Reset),SetBackgroundColor(Color::Reset));
             } else {
-                String::new()
+                return false;
             }
+            last=self.lines.last_mut().unwrap();
+        }
+        *last-=length;
+        print!("{}{}",SetAttribute(Attribute::Reset),SetBackgroundColor(bg));
+        if !self.first {
+            print!("{}",SetForegroundColor(self.prev_bg));
         } else {
-            String::new()
-        };
-        Git {pre,content}
-    }
-}
-struct DirList {
-    items:Vec<ListFileType>,
-}
-impl Display for DirList {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        if formatter.alternate() {
-            for item in self.items.iter() {
-                write!(formatter,"{:#}",item)?;
-            }
-            return Ok(());
-        } else {
-            for item in self.items.iter() {
-                write!(formatter,"{}",item)?;
-            }
-            return Ok(());
+            self.first=false;
         }
+        for attribute in attributes {
+            print!("{}",SetAttribute(attribute));
+        }
+        print!("{}{}",SetForegroundColor(fg),section);
+        self.prev_bg=bg;
+        return true;
     }
 }
-impl DirList {
-    fn len(&self)->usize {self.items.len()}
-    fn new(pwd:String,uid:u32)->Result<DirList,io::Error> {
-        let mut items=Vec::new();
-        if let Ok(dir_iter)=read_dir(&pwd) {
-            for item in dir_iter {
-                if let Ok(item)=item {
-                    let file_type=item.file_type()?;
-                    let name=item.file_name().into_string().expect("Found a non UTF8 filename");
-                    if file_type.is_symlink() {
-                        let path=item.path();
-                        if let Ok(link)=read_link(path) {
-                            if let Ok(metadata)=link.metadata() {
-                                items.push(ListFileType::new_symlink(name,metadata.file_type()));
-                            }
-                        }
-                    } else if file_type.is_dir() {
-                        let item_count=if let Ok(dir)=read_dir(item.path()) {
-                            dir.count()
-                        } else {
-                            0
-                        };
-                        items.push(ListFileType::new_dir(name,pwd.clone(),item_count));
-                    } else if file_type.is_char_device() {
-                        items.push(ListFileType::new_char(name));
-                    } else if file_type.is_block_device() {
-                        items.push(ListFileType::new_block(name));
-                    } else {    // it is a file. we don't support sockets or FIFOs yet
-                        let metadata=item.metadata()?;
-                        let mode=metadata.mode();
-                        let any_exec=mode&0o001==0o001&&uid==metadata.uid();
-                        let user_exec=mode&0o100==0o100;
-                        let exec=any_exec|user_exec;
-                        items.push(ListFileType::new_file(name,exec));
-                    }
-                }
-            }
-        }
-        return Ok(DirList{items});
-    }
-    #[allow(dead_code)]
-    fn get_items(&self,max_chars:usize,from:usize)->(String,usize) {
-        let mut res=String::new();
-        let mut chars_left=max_chars;
-        let mut i=from;
-        if i>=self.items.len() {return (String::new(),usize::MAX)}
-        for item in self.items[i..].iter() {
-            let uncolored=format!("{:#}",item);
-            let len=uncolored.chars().count();
-            if len>chars_left {
-                break;
-            }
-            chars_left-=len;
-            let colored=format!("{}",item);
-            res.push_str(&colored);
-            i+=1;
-        }
-        return (res,i);
+impl Drop for StatuslineFormatter {
+    fn drop(&mut self) {
+        println!("{}{}",SetForegroundColor(Color::Reset),SetBackgroundColor(Color::Reset));
     }
 }
-pub struct Status {
-    pre:String,
-    content:String,
+#[derive(Copy,Clone)]
+/// Copied from https://github.com/Clinery1/nebulous.nvim/blob/main/lua/nebulous/colors/night.lua
+pub struct Colors {
+    pub background:Color,
+    pub red:Color,
+    pub blue:Color,
+    pub green:Color,
+    pub purple:Color,
+    pub yellow:Color,
+    pub orange:Color,
+    pub violet:Color,
+    pub magenta:Color,
+    pub pink:Color,
+    pub white:Color,
+    pub cyan:Color,
+    pub aqua:Color,
+    pub black:Color,
+    pub grey:Color,
+    pub light_grey:Color,
+    pub dark_red:Color,
+    pub dark_orange:Color,
+    pub dark_blue:Color,
+    pub dark_green:Color,
+    pub dark_yellow:Color,
+    pub dark_magenta:Color,
+    pub dark_cyan:Color,
+    pub dark_aqua:Color,
+    pub dark_grey:Color,
+    pub dark_grey_2:Color,
+    pub custom_1:Color,
+    pub custom_2:Color,
+    pub custom_3:Color,
 }
-impl Display for Status {
-    fn fmt(&self,formatter:&mut Formatter)->fmt::Result {
-        if self.content.len()>0 {
-            if formatter.alternate() {
-                write!(formatter,"{}{}",self.pre,self.content)
-            } else {
-                let red=Rgb(0xCC,0x00,0x00);
-                let black=Rgb(0,0,0);
-                let start_color=format!("{}{}",Bold,red.bg_string());
-                let mid_color=black.fg_string();
-                let end_color=format!("{}{}",SReset,red.fg_string());
-                write!(formatter,"{}{}{}{}{}",start_color,self.pre,mid_color,self.content,end_color)
-            }
-        } else {
-            return Ok(());
+impl Default for Colors {
+    fn default()->Self {
+        Self {
+            background:     Color::Rgb{r:0x00,g:0x00,b:0x00},
+            red:            Color::Rgb{r:0xFB,g:0x46,b:0x7B},
+            blue:           Color::Rgb{r:0x0B,g:0xA8,b:0xE2},
+            green:          Color::Rgb{r:0xB8,g:0xEE,b:0x92},
+            purple:         Color::Rgb{r:0x97,g:0x5E,b:0xEC},
+            yellow:         Color::Rgb{r:0xFF,g:0xCC,b:0x00},
+            orange:         Color::Rgb{r:0xff,g:0x8d,b:0x03},
+            violet:         Color::Rgb{r:0xF2,g:0x81,b:0xF2},
+            magenta:        Color::Rgb{r:0xF9,g:0x5C,b:0xE6},
+            pink:           Color::Rgb{r:0xDB,g:0x73,b:0xDA},
+            white:          Color::Rgb{r:0xCE,g:0xD5,b:0xE5},
+            cyan:           Color::Rgb{r:0x80,g:0xa0,b:0xff},
+            aqua:           Color::Rgb{r:0x00,g:0xD5,b:0xA7},
+            black:          Color::Rgb{r:0x0b,g:0x10,b:0x15},
+            grey:           Color::Rgb{r:0x49,g:0x46,b:0x46},
+            light_grey:     Color::Rgb{r:0x13,g:0x19,b:0x1F},
+            dark_red:       Color::Rgb{r:0xFD,g:0x2E,b:0x6A},
+            dark_orange:    Color::Rgb{r:0xDE,g:0x7A,b:0x00},
+            dark_blue:      Color::Rgb{r:0x00,g:0x7E,b:0xD3},
+            dark_green:     Color::Rgb{r:0x5E,g:0xB9,b:0x5D},
+            dark_yellow:    Color::Rgb{r:0xB9,g:0x95,b:0x02},
+            dark_magenta:   Color::Rgb{r:0xFE,g:0x92,b:0xE1},
+            dark_cyan:      Color::Rgb{r:0x56,g:0xD6,b:0xD6},
+            dark_aqua:      Color::Rgb{r:0x00,g:0xA5,b:0x82},
+            dark_grey:      Color::Rgb{r:0x55,g:0x55,b:0x55},
+            dark_grey_2:    Color::Rgb{r:0x82,g:0x89,b:0x89},
+            custom_1:       Color::Rgb{r:0x2D,g:0x30,b:0x36},
+            custom_2:       Color::Rgb{r:0xAF,g:0xFD,b:0xF1},
+            custom_3:       Color::Rgb{r:0xE2,g:0xE7,b:0xE6},
         }
-    }
-}
-impl Status {
-    fn new(status_raw:String,first:bool)->Status {
-        let pre=if!first{""}else{""}.to_string();
-        let mut pipe_status=String::new();
-        let mut error=false;
-        for status in status_raw.split(' ') {
-            if status!="0" {error=true}
-            pipe_status.push_str(status);
-            pipe_status.push('ﳣ');
-        }
-        pipe_status.pop();
-        let content=if error {
-            pipe_status
-        } else {
-            String::new()
-        };
-        Status {pre,content}
-    }
-    fn is_active(&self)->bool {
-        self.content.is_empty()
     }
 }
 
@@ -708,104 +177,82 @@ const MAX_LINES:usize=3;
 
 fn main() { // dirs command displays directory stack
     let args=args().collect::<Vec<String>>();
-    let width=usize::from_str_radix(args[1].trim(),10).unwrap();
-    //let height=usize::from_str_radix(args[2].trim(),10).unwrap();
+    let (width,height)=get_terminal_size().unwrap();
+    let (width,_height)=(width as usize,height as usize);
     #[allow(unused)]
     {   // all the colors used
-        let tan=Rgb(0xD7,0xAF,0x87);
-        let green=Rgb(0x87,0xd7,0x87);
-        let blue=Rgb(0x00,0xaf,0xff);
-        let grey=Rgb(0x22,0x22,0x22);
-        let pink=Rgb(0xFF,0x5F,0x87);
-        let red=Rgb(0xCC,0x00,0x00);
-        let purple=Rgb(0xbf,0x00,0xFf);
-        let black=Rgb(0,0,0);
-        let dark_blue=Rgb(0x34,0x65,0xA4);
-        let cyan=Rgb(0x06,0x98,0x9A);
-        let device_color=Rgb(0xC4,0xA0,0x00);
-        let executable_color=Rgb(0x4E,0x9A,0x06);
+        let tan=Color::Rgb{r:0xD7,g:0xAF,b:0x87};
+        let green=Color::Rgb{r:0x87,g:0xd7,b:0x87};
+        let blue=Color::Rgb{r:0x00,g:0xaf,b:0xff};
+        let grey=Color::Rgb{r:0x22,g:0x22,b:0x22};
+        let pink=Color::Rgb{r:0xFF,g:0x5F,b:0x87};
+        let red=Color::Rgb{r:0xCC,g:0x00,b:0x00};
+        let purple=Color::Rgb{r:0xbf,g:0x00,b:0xFf};
+        let black=Color::Rgb{r:0,g:0,b:0};
+        let dark_blue=Color::Rgb{r:0x34,g:0x65,b:0xA4};
+        let cyan=Color::Rgb{r:0x06,g:0x98,b:0x9A};
+        let device_color=Color::Rgb{r:0xC4,g:0xA0,b:0x00};
+        let executable_color=Color::Rgb{r:0x4E,g:0x9A,b:0x06};
     }
     // get env vars
     let env=vars().collect::<HashMap<String,String>>();
     // wd=(echo "$PWD"|sed "s@$HOME@~@g")
-    let mut wd=env.get("PWD").unwrap().clone();
     // pwd=(echo "$PWD")
-    let blank_string=String::new();
-    let cached=env.get("CACHED").unwrap_or(&blank_string)=="true";
-    let cached_dir=env.get("CACHED_DIR").unwrap_or(&blank_string);
-    let cached_tmp_dir=env.get("CACHED_TMP_DIR").unwrap_or(&blank_string);
     let pwd=env.get("PWD").unwrap();
     let home=env.get("HOME").unwrap();
     let uid_str=String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
     let uid_str=uid_str.trim();
     let uid=u32::from_str_radix(uid_str,10).unwrap();
-    if wd.starts_with(home) {
-        wd.replace_range(0..home.len(),"~");
-    }
+    let wd=env.get("PWD").unwrap().replacen(home,"~",1);
     let mut execute_oneline=true;
     // arg parsing
-    if args.len()>=5 {
-        if args[3]=="--prompt" {
+    if args.len()>=3 {
+        if args[1]=="--prompt" {
+            let mut formatter=StatuslineFormatter::new(width,MAX_LINES-1);
             execute_oneline=false;
-            let status=args[4].trim().to_string();
-            let status=Status::new(status,true);
-            let dir_list=DirList::new(pwd.clone(),uid).unwrap();
-            let file_count=FileCount::new(dir_list.len(),false);
-            let time=Time::new(status.is_active());
-            let dir=Dir::new(wd.clone(),false,cached,cached_dir,cached_tmp_dir);
-            let git=Git::new(pwd,false);
-            let uncolored=format!("{:#}{:#}{:#}{:#}{:#}",status,time,dir,git,file_count);
-            let len=uncolored.chars().count()+1;  // easiest way to get a count of the unicode characters
-            print!("{}{}{}{}{}",status,time,dir,git,file_count);
-            let white=Rgb(0xff,0xff,0xff);
-            if width>len {
-                let (line1,mut end)=dir_list.get_items(width-len,0);
-                println!("{}",line1);
-                for i in (0..MAX_LINES-2).rev() {
-                    let x=dir_list.get_items(width-2,end);
-                    let line=x.0;
-                    end=x.1;
-                    if line=="" {
-                        println!("{}{}│",Reset.fg_str(),Reset.bg_str());
-                    } else {
-                        if i==0 {
-                            println!("{}{}{}",line,Reset.bg_str(),white.fg_string());
-                        } else {
-                            println!("{}",line);
-                        }
-                    }
+            let status=args[2].trim().to_string();
+            let status=PipeStatus::new(&status);
+            let time=Time::new();
+            let dir=Pwd::new(&wd);
+            let git=Git::new(pwd);
+            let dirs=DirList::new(&pwd,uid).unwrap();
+            let file_count=dirs.file_count();
+            status.display(&mut formatter);
+            time.display(&mut formatter);
+            dir.display(&mut formatter);
+            git.display(&mut formatter);
+            file_count.display(&mut formatter);
+            dirs.display(&mut formatter);
+            formatter.write_section("",Color::Reset,Color::Reset,vec![]);
+            for line in formatter.lines.iter() {
+                if *line==width {
+                    print!("\n│");
                 }
             }
-        } else if args[3]=="--preexec" {
+        } else if args[1]=="--preexec" {
+            let mut formatter=StatuslineFormatter::new(width,MAX_LINES-1);
             execute_oneline=false;
-            print!("\r{}",ClearCurrentLine);
+            print!("\r{}",Clear(ClearType::CurrentLine));
             for _ in 0..MAX_LINES {
-                print!("{}{}",CursorUp(1),ClearCurrentLine);
+                print!("{}{}",CursorUp(1),Clear(ClearType::CurrentLine));
             }
             // time to create another prompt
-            let cyan=Rgb(0x06,0x98,0x9A);
-            let black=Rgb(0,0,0);
-            let dir=Dir::new(wd.clone(),false,cached,cached_dir,cached_tmp_dir);
-            let git=Git::new(pwd,false);
-            println!("{}{}{}{}{}{}{}{}{}",
-                Time::new(true),
-                dir,
-                git,
-                cyan.bg_string(),   // bg
-                black.fg_string(),  // fg
-                args[4],
-                cyan.fg_string(),
-                Reset.bg_str(),
-                Reset.fg_str(),
-            );
-        } else if args[3]=="--postexec" {
+            let time=Time::new();
+            let dir=Pwd::new(&wd);
+            let git=Git::new(pwd);
+            let colors=Colors::default();
+            time.display(&mut formatter);
+            dir.display(&mut formatter);
+            git.display(&mut formatter);
+            formatter.write_section(&args[2],colors.black,colors.dark_aqua,vec![]);
+            formatter.write_section("",Color::Reset,Color::Reset,vec![]);
+        } else if args[1]=="--postexec" {
             execute_oneline=false;
             // unsupported so far
         }
-    } else if args.len()>=4 {
     }
     if execute_oneline {
         // default single line prompt
-        println!("{}{}└ﲒ ",Reset.fg_str(),Reset.bg_str());
+        println!("{}{}└ﲒ ",SetForegroundColor(Color::Reset),SetBackgroundColor(Color::Reset));
     }
 }

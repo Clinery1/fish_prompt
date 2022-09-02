@@ -3,9 +3,8 @@ name = "fish_prompt"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-git2="0.13.23"
-termion="1.5.6"
-chrono="0.4.19"
+git2="0.14"
+crossterm="0.25"
+time={version="0.3",features=["local-offset"]}
