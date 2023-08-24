@@ -69,14 +69,17 @@ impl StatuslineFormatter {
         if length>*last {
             self.lines.pop();
             if let Some(last)=self.lines.last() {
-                if *last<length {
-                    return false;
+                let last=*last;
+                if last<length {
+                   return false;
                 }
-                if *last>0 {
-                    self.write_section("",Color::Reset,Color::Reset,vec![]);
+                if last>0 {
+                    print!("{}{}",SetBackgroundColor(Color::Reset),SetForegroundColor(self.prev_bg));
                 }
                 self.first=true;
-                println!("{}{}",SetForegroundColor(Color::Reset),SetBackgroundColor(Color::Reset));
+                if last!=0 {
+                    println!("{}{}",SetForegroundColor(Color::Reset),SetBackgroundColor(Color::Reset));
+                }
             } else {
                 return false;
             }
@@ -253,6 +256,6 @@ fn main() { // dirs command displays directory stack
     }
     if execute_oneline {
         // default single line prompt
-        println!("{}{}└ﲒ ",SetForegroundColor(Color::Reset),SetBackgroundColor(Color::Reset));
+        println!("{}{}└󰞔 ",SetForegroundColor(Color::Reset),SetBackgroundColor(Color::Reset));
     }
 }
